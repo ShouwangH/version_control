@@ -1,0 +1,25 @@
+{
+  "name": "server",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch index.ts",
+    "migrate": "tsx db/migrate.ts",
+    "init": "bun run migrate && curl -s -X POST localhost:3000/init > /dev/null || true"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/express": "^5.0.3",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "cors": "^2.8.5",
+    "diff": "^8.0.2",
+    "drizzle-orm": "^0.44.6",
+    "express": "^5.1.0",
+    "zod": "^4.1.12"
+  }
+}

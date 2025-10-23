@@ -1,0 +1,5 @@
+- [ ] bring up server (health, migrate, init)
+- [ ] commit flow (snapshot → commit → refs move)
+- [ ] ui: graph renders nodes/edges
+- [ ] diff panel: shows adds/dels per file
+- [ ] cli: init/commit/log hit REST

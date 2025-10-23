@@ -1,0 +1,17 @@
+{
+  "name": "cli",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "vc": "index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "commander": "^14.0.1",
+    "ky": "^1.13.0"
+  }
+}
