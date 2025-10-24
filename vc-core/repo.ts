@@ -122,6 +122,14 @@ class RepoImpl implements VCRepo {
   async hydrate(ref: string): Promise<FileMap> {
     await this.ensureReady();
     const commit = await this.resolveCommit(ref);
+    const working = await this.getWorking();
+
+    if (working.treeHash === commit.treeHash) {
+      await this.storage.setWorkingState({ parentId: commit.id, treeHash: working.treeHash });
+      await this.storage.setRef(HEAD_REF, commit.id);
+      return this.loadTreeContents(working.treeHash);
+    }
+
     const files = await this.loadTreeContents(commit.treeHash);
     await this.storage.setWorkingState({ parentId: commit.id, treeHash: commit.treeHash });
     await this.storage.setRef(HEAD_REF, commit.id);
@@ -149,14 +157,11 @@ class RepoImpl implements VCRepo {
     const theirsFiles = await this.loadTreeContents(theirsCommit.treeHash);
 
     const { merged, conflicts } = this.mergeFileMaps(baseFiles, oursFiles, theirsFiles);
-    if (conflicts.length > 0) {
-      return { mergedTreeHash: null, conflicts, mergedFiles: null, commitId: null };
-    }
-
     const entries = this.sanitizeFileEntries(merged);
     const treeHash = await this.persistEntries(entries);
     const timestamp = this.clock();
-    const mergeMessage = `merge ${ref}`;
+    const hasConflicts = conflicts.length > 0;
+    const mergeMessage = hasConflicts ? `merge ${ref} (conflicts)` : `merge ${ref}`;
     const commitId = this.generateCommitId(
       [oursCommit.id, theirsCommit.id],
       treeHash,
@@ -180,7 +185,7 @@ class RepoImpl implements VCRepo {
     await this.storage.setRef(this.defaultBranch, mergeCommit.id);
     await this.storage.setRef(HEAD_REF, mergeCommit.id);
 
-    return { mergedTreeHash: treeHash, conflicts: [], mergedFiles: merged, commitId };
+    return { mergedTreeHash: treeHash, conflicts, mergedFiles: merged, commitId };
   }
 
   async log(): Promise<Commit[]> {
@@ -380,20 +385,30 @@ class RepoImpl implements VCRepo {
         continue;
       }
 
-      if (oursContent === baseContent) {
+      const oursMatchesBase = oursContent === baseContent;
+      const theirsMatchesBase = theirsContent === baseContent;
+
+      if (oursMatchesBase) {
         if (theirsContent !== undefined) merged[pathName] = theirsContent;
         continue;
       }
 
-      if (theirsContent === baseContent) {
+      if (theirsMatchesBase) {
         if (oursContent !== undefined) merged[pathName] = oursContent;
         continue;
       }
 
       conflicts.push({ path: pathName, base: baseContent, ours: oursContent, theirs: theirsContent });
+      merged[pathName] = this.buildConflictContent(oursContent, theirsContent);
     }
 
     return { merged, conflicts };
+  }
+
+  private buildConflictContent(ours: string | undefined, theirs: string | undefined) {
+    const oursSection = ours ?? "";
+    const theirsSection = theirs ?? "";
+    return ["<<<<<<< ours", oursSection, "=======", theirsSection, ">>>>>>> theirs"].join("\n");
   }
 }
 

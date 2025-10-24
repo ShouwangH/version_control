@@ -4,6 +4,9 @@
   "type": "module",
   "private": true,
   "main": "./repo.ts",
+  "scripts": {
+    "test": "../server/node_modules/.bin/tsx tests/merge.test.ts"
+  },
   "exports": {
     "./repo": "./repo.ts",
     "./storage": "./storage.ts",

@@ -69,7 +69,13 @@ program
   .action(async (ref: string) => {
     const repo = await ensureRepo();
     try {
+      const before = await repo.getWorking();
       const files = await repo.hydrate(ref);
+      const after = await repo.getWorking();
+      if (after.treeHash === before.treeHash) {
+        console.log(`hydrated ${ref} (no changes)`);
+        return;
+      }
       await writeWorkspace(process.cwd(), files);
       console.log(`hydrated ${ref}`);
     } catch (error) {
@@ -84,14 +90,14 @@ program
     const repo = await ensureRepo();
     try {
       const result = await repo.merge(ref);
+      if (result.mergedFiles) {
+        await writeWorkspace(process.cwd(), result.mergedFiles);
+      }
+
       if (result.conflicts.length > 0) {
         console.log(`merge produced ${result.conflicts.length} conflict(s)`);
         result.conflicts.forEach((conflict) => console.log(` - ${conflict.path}`));
-        return;
-      }
-
-      if (result.mergedFiles) {
-        await writeWorkspace(process.cwd(), result.mergedFiles);
+        console.log("conflict markers written to workspace files");
       }
 
       if (result.commitId) {
