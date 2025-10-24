@@ -8,10 +8,10 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/node": "^22.7.5",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "commander": "^14.0.1",
-    "ky": "^1.13.0"
+    "commander": "^14.0.1"
   }
 }

@@ -1,0 +1,22 @@
+{
+  "name": "vc-core",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "main": "./repo.ts",
+  "exports": {
+    "./repo": "./repo.ts",
+    "./storage": "./storage.ts",
+    "./types": "./types.ts",
+    "./diff": "./diff.ts",
+    "./merge": "./merge.ts"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.10",
+    "@types/node": "^22.7.5",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1"
+  }
+}
