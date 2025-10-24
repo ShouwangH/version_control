@@ -6,10 +6,10 @@
   "scripts": {
     "dev": "tsx watch index.ts",
     "migrate": "tsx db/migrate.ts",
-    "init": "bun run migrate && curl -s -X POST localhost:3000/init > /dev/null || true"
+    "init": "npm run migrate && curl -s -X POST localhost:3000/init > /dev/null || true"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "tsx": "^4.20.6",

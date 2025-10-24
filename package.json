@@ -1,0 +1,11 @@
+{
+  "name": "vc-monorepo",
+  "private": true,
+  "workspaces": [
+    "cli",
+    "client",
+    "server",
+    "vc-core",
+    "web"
+  ]
+}

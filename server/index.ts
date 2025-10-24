@@ -15,6 +15,16 @@ const db = getDb();
 const remoteRepo = createLocalRepo({ rootDir: path.join(process.cwd(), ".vc-remote"), author: "server" });
 const repoReady = remoteRepo.init();
 
+function normalizeTextContent(value: string): string {
+  if (value.includes("\\n") || value.includes("\\r") || value.includes("\\t")) {
+    return value
+      .replace(/\\r\\n/g, "\n")
+      .replace(/\\n/g, "\n")
+      .replace(/\\t/g, "\t");
+  }
+  return value;
+}
+
 // health
 app.get("/health", (_, res) => res.json({ ok: true }));
 
@@ -97,7 +107,7 @@ app.get("/tree/:hash", async (req, res) => {
       if (content === undefined) {
         return res.status(500).json({ error: `missing blob ${blobHash} for ${path}` });
       }
-      files[path] = content;
+      files[path] = normalizeTextContent(content);
     }
 
     res.json({ files });
@@ -176,7 +186,7 @@ app.post("/diff", async (req, res) => {
         if (content === undefined) {
           throw new Error(`missing blob ${blobHash} for ${filePath}`);
         }
-        files[filePath] = content;
+        files[filePath] = normalizeTextContent(content);
       }
       return files;
     };
