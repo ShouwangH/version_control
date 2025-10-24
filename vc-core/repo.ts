@@ -2,7 +2,16 @@ import { createHash } from "crypto";
 import path from "node:path";
 import { createInMemoryStorage, createSqliteStorage } from "./storage";
 import type { StorageAdapter, SqliteStorageConfig } from "./storage";
-import type { Commit, CommitSource, FileMap, MergeConflict, MergeResult, VCRepo, WorkingState } from "./types";
+import type {
+  Commit,
+  CommitSource,
+  FileMap,
+  MergeConflict,
+  MergeResult,
+  RepoSnapshot,
+  VCRepo,
+  WorkingState,
+} from "./types";
 
 export interface RepoConfig {
   storage?: StorageAdapter;
@@ -113,6 +122,14 @@ class RepoImpl implements VCRepo {
   async hydrate(ref: string): Promise<FileMap> {
     await this.ensureReady();
     const commit = await this.resolveCommit(ref);
+    const working = await this.getWorking();
+
+    if (working.treeHash === commit.treeHash) {
+      await this.storage.setWorkingState({ parentId: commit.id, treeHash: working.treeHash });
+      await this.storage.setRef(HEAD_REF, commit.id);
+      return this.loadTreeContents(working.treeHash);
+    }
+
     const files = await this.loadTreeContents(commit.treeHash);
     await this.storage.setWorkingState({ parentId: commit.id, treeHash: commit.treeHash });
     await this.storage.setRef(HEAD_REF, commit.id);
@@ -140,14 +157,11 @@ class RepoImpl implements VCRepo {
     const theirsFiles = await this.loadTreeContents(theirsCommit.treeHash);
 
     const { merged, conflicts } = this.mergeFileMaps(baseFiles, oursFiles, theirsFiles);
-    if (conflicts.length > 0) {
-      return { mergedTreeHash: null, conflicts, mergedFiles: null, commitId: null };
-    }
-
     const entries = this.sanitizeFileEntries(merged);
     const treeHash = await this.persistEntries(entries);
     const timestamp = this.clock();
-    const mergeMessage = `merge ${ref}`;
+    const hasConflicts = conflicts.length > 0;
+    const mergeMessage = hasConflicts ? `merge ${ref} (conflicts)` : `merge ${ref}`;
     const commitId = this.generateCommitId(
       [oursCommit.id, theirsCommit.id],
       treeHash,
@@ -171,12 +185,58 @@ class RepoImpl implements VCRepo {
     await this.storage.setRef(this.defaultBranch, mergeCommit.id);
     await this.storage.setRef(HEAD_REF, mergeCommit.id);
 
-    return { mergedTreeHash: treeHash, conflicts: [], mergedFiles: merged, commitId };
+    return { mergedTreeHash: treeHash, conflicts, mergedFiles: merged, commitId };
   }
 
   async log(): Promise<Commit[]> {
     await this.ensureReady();
     return this.storage.listCommits();
+  }
+
+  async exportSnapshot(): Promise<RepoSnapshot> {
+    await this.ensureReady();
+    const commits = await this.storage.listCommits();
+    const trees = await this.storage.listTrees();
+    const blobs = await this.storage.listBlobs();
+    const refs = await this.storage.listRefs();
+
+    return {
+      commits,
+      trees: trees.map((tree) => ({ hash: tree.hash, files: { ...tree.files } })),
+      blobs: blobs.map((blob) => ({
+        hash: blob.hash,
+        size: blob.size,
+        content: Buffer.from(blob.content).toString("base64"),
+      })),
+      refs,
+    };
+  }
+
+  async importSnapshot(snapshot: RepoSnapshot): Promise<void> {
+    await this.ensureReady();
+
+    for (const blob of snapshot.blobs) {
+      const buffer = Buffer.from(blob.content, "base64");
+      await this.storage.saveBlob({ hash: blob.hash, content: buffer, size: blob.size ?? buffer.length });
+    }
+
+    for (const tree of snapshot.trees) {
+      await this.storage.saveTree({ hash: tree.hash, files: { ...tree.files } });
+    }
+
+    for (const commit of snapshot.commits) {
+      await this.storage.saveCommit(commit);
+    }
+
+    for (const [name, commitId] of Object.entries(snapshot.refs)) {
+      await this.storage.setRef(name, commitId);
+    }
+
+    const headCommitId = snapshot.refs[HEAD_REF];
+    if (headCommitId) {
+      const headCommit = await this.getCommitOrThrow(headCommitId);
+      await this.storage.setWorkingState({ parentId: headCommit.id, treeHash: headCommit.treeHash });
+    }
   }
 
   private async ensureReady() {
@@ -325,20 +385,30 @@ class RepoImpl implements VCRepo {
         continue;
       }
 
-      if (oursContent === baseContent) {
+      const oursMatchesBase = oursContent === baseContent;
+      const theirsMatchesBase = theirsContent === baseContent;
+
+      if (oursMatchesBase) {
         if (theirsContent !== undefined) merged[pathName] = theirsContent;
         continue;
       }
 
-      if (theirsContent === baseContent) {
+      if (theirsMatchesBase) {
         if (oursContent !== undefined) merged[pathName] = oursContent;
         continue;
       }
 
       conflicts.push({ path: pathName, base: baseContent, ours: oursContent, theirs: theirsContent });
+      merged[pathName] = this.buildConflictContent(oursContent, theirsContent);
     }
 
     return { merged, conflicts };
+  }
+
+  private buildConflictContent(ours: string | undefined, theirs: string | undefined) {
+    const oursSection = ours ?? "";
+    const theirsSection = theirs ?? "";
+    return ["<<<<<<< ours", oursSection, "=======", theirsSection, ">>>>>>> theirs"].join("\n");
   }
 }
 

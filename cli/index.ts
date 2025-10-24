@@ -3,10 +3,11 @@ import { promises as fsp, Dirent } from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import { createLocalRepo } from "../vc-core/repo";
-import type { FileMap, VCRepo } from "../vc-core/types";
+import type { FileMap, RepoSnapshot, VCRepo } from "../vc-core/types";
 
 const IGNORED_DIRS = new Set([".git", ".vc", "node_modules", "dist", ".build", ".tmp"]);
 const IGNORED_FILES = new Set([".DS_Store"]);
+const DEFAULT_REMOTE = process.env.VC_REMOTE ?? "http://localhost:3000";
 
 const program = new Command();
 program.name("vc").description("vc-core local CLI");
@@ -68,7 +69,13 @@ program
   .action(async (ref: string) => {
     const repo = await ensureRepo();
     try {
+      const before = await repo.getWorking();
       const files = await repo.hydrate(ref);
+      const after = await repo.getWorking();
+      if (after.treeHash === before.treeHash) {
+        console.log(`hydrated ${ref} (no changes)`);
+        return;
+      }
       await writeWorkspace(process.cwd(), files);
       console.log(`hydrated ${ref}`);
     } catch (error) {
@@ -83,14 +90,14 @@ program
     const repo = await ensureRepo();
     try {
       const result = await repo.merge(ref);
+      if (result.mergedFiles) {
+        await writeWorkspace(process.cwd(), result.mergedFiles);
+      }
+
       if (result.conflicts.length > 0) {
         console.log(`merge produced ${result.conflicts.length} conflict(s)`);
         result.conflicts.forEach((conflict) => console.log(` - ${conflict.path}`));
-        return;
-      }
-
-      if (result.mergedFiles) {
-        await writeWorkspace(process.cwd(), result.mergedFiles);
+        console.log("conflict markers written to workspace files");
       }
 
       if (result.commitId) {
@@ -101,6 +108,30 @@ program
     } catch (error) {
       handleError("merge", error);
     }
+  });
+
+program
+  .command("push")
+  .description("push local repository state to remote")
+  .option("--remote <url>", "remote base URL", DEFAULT_REMOTE)
+  .action(async (opts: { remote?: string }) => {
+    const repo = await ensureRepo();
+    const snapshot = await repo.exportSnapshot();
+    const remote = opts.remote ?? DEFAULT_REMOTE;
+    await sendSnapshot(remote, snapshot);
+    console.log(`pushed ${snapshot.commits.length} commits to ${remote}`);
+  });
+
+program
+  .command("pull")
+  .description("pull remote repository state into local repo")
+  .option("--remote <url>", "remote base URL", DEFAULT_REMOTE)
+  .action(async (opts: { remote?: string }) => {
+    const repo = await ensureRepo();
+    const remote = opts.remote ?? DEFAULT_REMOTE;
+    const snapshot = await fetchSnapshot(remote);
+    await repo.importSnapshot(snapshot);
+    console.log(`pulled ${snapshot.commits.length} commits from ${remote}`);
   });
 
 await program.parseAsync();
@@ -209,4 +240,31 @@ function handleError(command: string, error: unknown) {
     return;
   }
   throw error instanceof Error ? error : new Error(String(error));
+}
+
+async function sendSnapshot(remote: string, snapshot: RepoSnapshot) {
+  const url = buildRemoteUrl(remote, "/push");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(snapshot),
+  });
+  if (!res.ok) {
+    throw new Error(`push failed: ${res.status} ${res.statusText}`);
+  }
+}
+
+async function fetchSnapshot(remote: string): Promise<RepoSnapshot> {
+  const url = buildRemoteUrl(remote, "/pull");
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`pull failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as RepoSnapshot;
+}
+
+function buildRemoteUrl(base: string, pathSuffix: string) {
+  const baseUrl = base.endsWith("/") ? base : `${base}/`;
+  const target = pathSuffix.startsWith("/") ? pathSuffix.slice(1) : pathSuffix;
+  return new URL(target, baseUrl).toString();
 }

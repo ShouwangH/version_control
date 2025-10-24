@@ -19,8 +19,10 @@ export interface StorageAdapter {
   clear(): Promise<void>;
   saveBlob(blob: BlobRecord): Promise<void>;
   getBlob(hash: string): Promise<BlobRecord | null>;
+  listBlobs(): Promise<BlobRecord[]>;
   saveTree(tree: TreeRecord): Promise<void>;
   getTree(hash: string): Promise<TreeRecord | null>;
+  listTrees(): Promise<TreeRecord[]>;
   saveCommit(commit: Commit): Promise<void>;
   getCommit(id: string): Promise<Commit | null>;
   listCommits(): Promise<Commit[]>;
@@ -56,12 +58,22 @@ export function createInMemoryStorage(): StorageAdapter {
     async getBlob(hash) {
       return blobs.get(hash) ?? null;
     },
+    async listBlobs() {
+      return Array.from(blobs.values()).map((blob) => ({
+        hash: blob.hash,
+        content: Buffer.from(blob.content),
+        size: blob.size,
+      }));
+    },
     async saveTree(tree) {
       trees.set(tree.hash, { ...tree, files: { ...tree.files } });
     },
     async getTree(hash) {
       const tree = trees.get(hash);
       return tree ? { hash: tree.hash, files: { ...tree.files } } : null;
+    },
+    async listTrees() {
+      return Array.from(trees.values()).map((tree) => ({ hash: tree.hash, files: { ...tree.files } }));
     },
     async saveCommit(commit) {
       commits.set(commit.id, { ...commit, parents: [...commit.parents] });
@@ -113,7 +125,9 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
       db = new Database(dbPath);
       db.pragma("journal_mode = WAL");
     }
-    return db;
+    return db
+    
+    ;
   };
 
   const serializeFiles = (files: Record<string, string>) => JSON.stringify(files);
@@ -195,6 +209,13 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
         .get(hash) as { hash: string; content: Buffer; size: number } | undefined;
       return row ? { hash: row.hash, content: row.content, size: row.size } : null;
     },
+    async listBlobs() {
+      const database = ensureDb();
+      const rows = database
+        .prepare(`SELECT hash, content, size FROM blobs`)
+        .all() as Array<{ hash: string; content: Buffer; size: number }>;
+      return rows.map((row) => ({ hash: row.hash, content: row.content, size: row.size }));
+    },
     async saveTree(tree) {
       const database = ensureDb();
       database
@@ -207,6 +228,13 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
         .prepare(`SELECT hash, files FROM trees WHERE hash = ?`)
         .get(hash) as { hash: string; files: string } | undefined;
       return row ? { hash: row.hash, files: deserializeFiles(row.files) } : null;
+    },
+    async listTrees() {
+      const database = ensureDb();
+      const rows = database
+        .prepare(`SELECT hash, files FROM trees`)
+        .all() as Array<{ hash: string; files: string }>;
+      return rows.map((row) => ({ hash: row.hash, files: deserializeFiles(row.files) }));
     },
     async saveCommit(commit) {
       const database = ensureDb();

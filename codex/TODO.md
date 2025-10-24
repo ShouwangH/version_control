@@ -1,6 +1,0 @@
-- [x] vc-core: implement sqlite-backed storage adapter
-- [x] vc-core: expose and test hydrate/merge before integrating clients
-- [ ] vc-core: add targeted tests (tsx scripts) for snapshot → hydrate → merge workflows
-- [ ] CLI/server: migrate commands and endpoints to vc-core repo API (after core verified)
-- [ ] Web viewer: update to read-only DAG once REST reflects vc-core
-- [ ] Preserve working `vc init` behaviour during refactors (add regression test once core stabilizes)

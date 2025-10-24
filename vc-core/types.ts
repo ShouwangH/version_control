@@ -34,6 +34,24 @@ export interface MergeResult {
   commitId?: string | null;
 }
 
+export interface SerializedBlob {
+  hash: string;
+  content: string;
+  size: number;
+}
+
+export interface TreeSnapshot {
+  hash: string;
+  files: Record<string, string>;
+}
+
+export interface RepoSnapshot {
+  commits: Commit[];
+  trees: TreeSnapshot[];
+  blobs: SerializedBlob[];
+  refs: Record<string, string>;
+}
+
 export interface VCRepo {
   init(): Promise<void>;
   getWorking(): Promise<WorkingState>;
@@ -42,4 +60,6 @@ export interface VCRepo {
   hydrate(ref: string): Promise<FileMap>;
   merge(ref: string): Promise<MergeResult>;
   log(): Promise<Commit[]>;
+  exportSnapshot(): Promise<RepoSnapshot>;
+  importSnapshot(snapshot: RepoSnapshot): Promise<void>;
 }
