@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env tsx
 import { promises as fsp, Dirent } from "node:fs";
 import path from "node:path";
 import { Command } from "commander";

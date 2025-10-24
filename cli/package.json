@@ -1,17 +1,16 @@
 {
   "name": "cli",
-  "module": "index.ts",
   "type": "module",
   "private": true,
   "bin": {
     "vc": "index.ts"
   },
   "devDependencies": {
-    "@types/bun": "latest",
     "@types/node": "^22.7.5",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "commander": "^14.0.1"
+    "commander": "^14.0.1",
+    "tsx": "^4.20.6"
   }
 }
