@@ -1,5 +1,6 @@
-- [ ] bring up server (health, migrate, init)
-- [ ] commit flow (snapshot → commit → refs move)
-- [ ] ui: graph renders nodes/edges
-- [ ] diff panel: shows adds/dels per file
-- [ ] cli: init/commit/log hit REST
+- [x] vc-core: implement sqlite-backed storage adapter
+- [ ] vc-core: expose and test hydrate/merge before integrating clients
+- [ ] vc-core: add targeted tests (tsx scripts) for snapshot → hydrate → merge workflows
+- [ ] CLI/server: migrate commands and endpoints to vc-core repo API (after core verified)
+- [ ] Web viewer: update to read-only DAG once REST reflects vc-core
+- [ ] Preserve working `vc init` behaviour during refactors (add regression test once core stabilizes)
