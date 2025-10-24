@@ -24,7 +24,7 @@ async function testMergeConflictMarkers() {
   const base = await seedBaseCommit(repo, "base content");
 
   await repo.snapshot({ "note.txt": "ours change" });
-  const ours = await repo.commit("ours", "human");plea
+  const ours = await repo.commit("ours", "human");
 
   await repo.hydrate(base.id);
   await repo.snapshot({ "note.txt": "theirs change" });
@@ -44,6 +44,10 @@ async function testMergeConflictMarkers() {
 
   const working = await repo.getWorking();
   assert.equal(working.parentId, result.commitId);
+
+  const history = await repo.log();
+  const mergeCommit = history.find((commit) => commit.id === result.commitId);
+  assert.deepEqual(mergeCommit?.aiMeta, { conflicts: result.conflicts });
 }
 
 async function testMergePrefersLocalChanges() {
@@ -64,6 +68,10 @@ async function testMergePrefersLocalChanges() {
 
   assert.equal(result.conflicts.length, 0);
   assert.equal(result.mergedFiles?.["note.txt"], "ours change");
+
+  const history = await repo.log();
+  const mergeCommit = history.find((commit) => commit.id === result.commitId);
+  assert.equal(mergeCommit?.aiMeta ?? null, null);
 }
 
 async function testHydrateNoopWhenTreeMatches() {

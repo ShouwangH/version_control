@@ -162,12 +162,13 @@ class RepoImpl implements VCRepo {
     const timestamp = this.clock();
     const hasConflicts = conflicts.length > 0;
     const mergeMessage = hasConflicts ? `merge ${ref} (conflicts)` : `merge ${ref}`;
+    const mergeMeta = hasConflicts ? { conflicts } : null;
     const commitId = this.generateCommitId(
       [oursCommit.id, theirsCommit.id],
       treeHash,
       mergeMessage,
       timestamp,
-      null,
+      mergeMeta,
     );
     const mergeCommit: Commit = {
       id: commitId,
@@ -176,7 +177,7 @@ class RepoImpl implements VCRepo {
       message: mergeMessage,
       author: this.author,
       source: "system",
-      aiMeta: null,
+      aiMeta: mergeMeta,
       timestamp,
     };
 
