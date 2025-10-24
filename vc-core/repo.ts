@@ -2,7 +2,16 @@ import { createHash } from "crypto";
 import path from "node:path";
 import { createInMemoryStorage, createSqliteStorage } from "./storage";
 import type { StorageAdapter, SqliteStorageConfig } from "./storage";
-import type { Commit, CommitSource, FileMap, MergeConflict, MergeResult, VCRepo, WorkingState } from "./types";
+import type {
+  Commit,
+  CommitSource,
+  FileMap,
+  MergeConflict,
+  MergeResult,
+  RepoSnapshot,
+  VCRepo,
+  WorkingState,
+} from "./types";
 
 export interface RepoConfig {
   storage?: StorageAdapter;
@@ -177,6 +186,52 @@ class RepoImpl implements VCRepo {
   async log(): Promise<Commit[]> {
     await this.ensureReady();
     return this.storage.listCommits();
+  }
+
+  async exportSnapshot(): Promise<RepoSnapshot> {
+    await this.ensureReady();
+    const commits = await this.storage.listCommits();
+    const trees = await this.storage.listTrees();
+    const blobs = await this.storage.listBlobs();
+    const refs = await this.storage.listRefs();
+
+    return {
+      commits,
+      trees: trees.map((tree) => ({ hash: tree.hash, files: { ...tree.files } })),
+      blobs: blobs.map((blob) => ({
+        hash: blob.hash,
+        size: blob.size,
+        content: Buffer.from(blob.content).toString("base64"),
+      })),
+      refs,
+    };
+  }
+
+  async importSnapshot(snapshot: RepoSnapshot): Promise<void> {
+    await this.ensureReady();
+
+    for (const blob of snapshot.blobs) {
+      const buffer = Buffer.from(blob.content, "base64");
+      await this.storage.saveBlob({ hash: blob.hash, content: buffer, size: blob.size ?? buffer.length });
+    }
+
+    for (const tree of snapshot.trees) {
+      await this.storage.saveTree({ hash: tree.hash, files: { ...tree.files } });
+    }
+
+    for (const commit of snapshot.commits) {
+      await this.storage.saveCommit(commit);
+    }
+
+    for (const [name, commitId] of Object.entries(snapshot.refs)) {
+      await this.storage.setRef(name, commitId);
+    }
+
+    const headCommitId = snapshot.refs[HEAD_REF];
+    if (headCommitId) {
+      const headCommit = await this.getCommitOrThrow(headCommitId);
+      await this.storage.setWorkingState({ parentId: headCommit.id, treeHash: headCommit.treeHash });
+    }
   }
 
   private async ensureReady() {

@@ -1,13 +1,19 @@
 import express from "express";
 import cors from "cors";
+import path from "node:path";
 import { getDb } from "./db/schema";
 import { sha256 } from "./utils/hash";
 import { summarizeDiff } from "./utils/diff";
+import { createLocalRepo } from "../vc-core/repo";
+import type { RepoSnapshot } from "../vc-core/types";
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "50mb" }));
 const db = getDb();
+
+const remoteRepo = createLocalRepo({ rootDir: path.join(process.cwd(), ".vc-remote"), author: "server" });
+const repoReady = remoteRepo.init();
 
 // health
 app.get("/health", (_, res) => res.json({ ok: true }));
@@ -155,6 +161,31 @@ app.post("/diff", (req, res) => {
     out[p] = summarizeDiff(oldContent, newContent);
   }
   res.json({ perFile: out });
+});
+
+app.post("/push", async (req, res) => {
+  const snapshot = req.body as RepoSnapshot;
+  try {
+    await repoReady;
+    await remoteRepo.importSnapshot(snapshot);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("push error", error);
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
+  }
+});
+
+app.get("/pull", async (_req, res) => {
+  try {
+    await repoReady;
+    const snapshot = await remoteRepo.exportSnapshot();
+    res.json(snapshot);
+  } catch (error) {
+    console.error("pull error", error);
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
+  }
 });
 
 const PORT = 3000;
