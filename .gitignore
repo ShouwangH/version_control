@@ -4,3 +4,4 @@ dist
 .env
 .vc
 server/.db.sqlite
+.codex
