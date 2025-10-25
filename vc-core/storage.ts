@@ -103,8 +103,13 @@ export function createInMemoryStorage(): StorageAdapter {
       return Object.fromEntries(refs.entries());
     },
     async resolveRef(ref) {
+      if (!ref) return null;
       if (commits.has(ref)) return ref;
-      return refs.get(ref) ?? null;
+      const refTarget = refs.get(ref);
+      if (refTarget) return refTarget;
+      const matches = Array.from(commits.keys()).filter((id) => id.startsWith(ref));
+      if (matches.length === 1) return matches[0]!;
+      return null;
     },
   };
 }
@@ -118,6 +123,8 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
   const filename = config.filename ?? "repo.sqlite";
   const dbPath = path.join(config.rootDir, filename);
   let db: Database.Database | null = null;
+
+  const escapeLikePattern = (input: string) => input.replace(/([%_\\])/g, "\\$1");
 
   const ensureDb = () => {
     if (!db) {
@@ -346,12 +353,20 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
       }, {});
     },
     async resolveRef(ref) {
+      if (!ref) return null;
       const database = ensureDb();
       const commitExists = database
         .prepare(`SELECT 1 FROM commits WHERE id = ? LIMIT 1`)
         .get(ref) as { 1: number } | undefined;
       if (commitExists) return ref;
-      return getRefValue(ref);
+      const refValue = getRefValue(ref);
+      if (refValue) return refValue;
+      const prefix = escapeLikePattern(ref);
+      const matches = database
+        .prepare(`SELECT id FROM commits WHERE id LIKE ? ESCAPE '\\'`)
+        .all(`${prefix}%`) as Array<{ id: string }>;
+      if (matches.length === 1) return matches[0]!.id;
+      return null;
     },
   };
 }
