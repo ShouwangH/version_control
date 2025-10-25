@@ -1,10 +1,33 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CommitList } from "./components/CommitList";
 import { DiffViewer, type ViewMode } from "./components/DiffViewer";
 import { FileList } from "./components/FileList";
-import type { Commit, DiffEntry, GraphResponse, TreeResponse, ConflictEntry } from "./types";
+import type {
+  Commit,
+  DiffEntry,
+  GraphResponse,
+  TreeResponse,
+  ConflictEntry,
+  WorkingStatePayload,
+} from "./types";
 
 const API_BASE = "/api";
+const POLL_INTERVAL_MS = 5000;
+
+type RepoListResponse = { active: string | null; repos: string[] };
+type RepoSwitchResponse = { active: string; repos: string[] };
+
+function shortId(value: string | null | undefined) {
+  return value ? value.slice(0, 8) : "none";
+}
+
+function formatRelativeTime(timestamp: number) {
+  const diff = Date.now() - timestamp;
+  if (diff < 5_000) return "just now";
+  if (diff < 60_000) return `${Math.floor(diff / 1_000)}s ago`;
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  return new Date(timestamp).toLocaleTimeString();
+}
 
 function sortCommits(commits: Commit[]): Commit[] {
   return [...commits].sort((a, b) => b.timestamp - a.timestamp);
@@ -17,6 +40,8 @@ function getConflicts(aiMeta: Commit["aiMeta"]): ConflictEntry[] {
 }
 
 export default function App() {
+  type WorkingState = WorkingStatePayload & { receivedAt: number };
+
   const [commits, setCommits] = useState<Commit[]>([]);
   const [selectedCommitId, setSelectedCommitId] = useState<string | null>(null);
   const [selectedParentId, setSelectedParentId] = useState<string | null>(null);
@@ -24,8 +49,12 @@ export default function App() {
   const [diffEntries, setDiffEntries] = useState<Record<string, DiffEntry>>({});
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("merged");
-  const [statusMessage, setStatusMessage] = useState<string>("Loading commits…");
+  const [statusMessage, setStatusMessage] = useState<string>("Loading repositories…");
   const [error, setError] = useState<string | null>(null);
+  const [workingState, setWorkingState] = useState<WorkingState | null>(null);
+  const [repoOptions, setRepoOptions] = useState<string[]>([]);
+  const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
+  const [isSwitchingRepo, setIsSwitchingRepo] = useState<boolean>(false);
 
   const commitsById = useMemo(() => {
     const map = new Map<string, Commit>();
@@ -37,26 +66,185 @@ export default function App() {
 
   const selectedCommit = selectedCommitId ? commitsById.get(selectedCommitId) ?? null : null;
   const conflicts = selectedCommit ? getConflicts(selectedCommit.aiMeta) : [];
+  const graphRequestId = useRef(0);
+  const latestCommitRef = useRef<string | null>(null);
+  const followHeadRef = useRef<boolean>(true);
 
-  useEffect(() => {
-    async function loadGraph() {
+  const loadGraph = useCallback(
+    async (options?: { reset?: boolean }) => {
+      if (!selectedRepo) return;
+      if (options?.reset) {
+        setStatusMessage("Loading commits…");
+        setCommits([]);
+        setSelectedCommitId(null);
+        setSelectedParentId(null);
+        setTreeFiles({});
+        setSelectedFile(null);
+        setDiffEntries({});
+        latestCommitRef.current = null;
+        followHeadRef.current = true;
+      }
+
+      const requestId = ++graphRequestId.current;
       try {
-        const res = await fetch(`${API_BASE}/graph`);
-        if (!res.ok) throw new Error(`graph request failed: ${res.status}`);
+        const res = await fetch(`${API_BASE}/graph`, { cache: "no-store" });
+        if (!res.ok) {
+          throw new Error(`graph request failed: ${res.status}`);
+        }
         const data = (await res.json()) as GraphResponse;
+        if (graphRequestId.current !== requestId) return;
         const ordered = sortCommits(data.commits);
+        const latestId = ordered[0]?.id ?? null;
+
+        latestCommitRef.current = latestId;
         setCommits(ordered);
-        const initial = ordered[0]?.id ?? null;
-        setSelectedCommitId(initial);
         setStatusMessage(ordered.length === 0 ? "No commits yet" : "");
+        setError(null);
+
+        setSelectedCommitId((current) => {
+          if (!current) return latestId ?? null;
+          const stillExists = ordered.some((commit) => commit.id === current);
+          if (!stillExists) return latestId ?? null;
+          if (followHeadRef.current && latestId && current !== latestId) {
+            return latestId;
+          }
+          return current;
+        });
       } catch (err) {
+        if (graphRequestId.current !== requestId) return;
         console.error(err);
         setError(err instanceof Error ? err.message : String(err));
         setStatusMessage("Failed to load commits");
       }
+    },
+    [selectedRepo],
+  );
+
+  useEffect(() => {
+    const latest = latestCommitRef.current;
+    if (!latest) {
+      followHeadRef.current = true;
+      return;
     }
-    loadGraph();
+    followHeadRef.current = selectedCommitId === latest;
+  }, [selectedCommitId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchRepos() {
+      try {
+        const res = await fetch(`${API_BASE}/repos`);
+        if (!res.ok) throw new Error(`repo list request failed: ${res.status}`);
+        const data = (await res.json()) as RepoListResponse;
+        if (cancelled) return;
+        const uniqueRepos = Array.from(new Set(data.repos)).sort((a, b) => a.localeCompare(b));
+        setRepoOptions(uniqueRepos);
+        const initialRepo = data.active ?? uniqueRepos[0] ?? null;
+        setSelectedRepo(initialRepo);
+        setStatusMessage(initialRepo ? "Loading commits…" : "No repositories available");
+        setError(null);
+      } catch (err) {
+        if (cancelled) return;
+        console.error(err);
+        setError(err instanceof Error ? err.message : String(err));
+        setStatusMessage("Failed to load repositories");
+      }
+    }
+
+    fetchRepos();
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+useEffect(() => {
+  if (!selectedRepo) {
+    setCommits([]);
+    setSelectedCommitId(null);
+    setSelectedParentId(null);
+    setTreeFiles({});
+    setSelectedFile(null);
+    setDiffEntries({});
+    setStatusMessage(repoOptions.length === 0 ? "No repositories available" : "Select a repository");
+    latestCommitRef.current = null;
+    followHeadRef.current = true;
+    return;
+  }
+
+  void loadGraph({ reset: true });
+}, [selectedRepo, repoOptions, loadGraph]);
+
+useEffect(() => {
+  if (!selectedRepo) return;
+  const timer = window.setInterval(() => {
+    void loadGraph();
+  }, POLL_INTERVAL_MS);
+  return () => window.clearInterval(timer);
+}, [selectedRepo, loadGraph]);
+
+useEffect(() => {
+  if (!selectedRepo) {
+    setWorkingState(null);
+    return;
+  }
+
+  let isCancelled = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  async function fetchWorkingState() {
+    try {
+      const res = await fetch(`${API_BASE}/working`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`working request failed: ${res.status}`);
+      const data = (await res.json()) as WorkingStatePayload;
+      if (!isCancelled) {
+        setWorkingState({ ...data, receivedAt: Date.now() });
+      }
+    } catch (err) {
+      if (!isCancelled) {
+        console.error(err);
+      }
+    }
+  }
+
+  fetchWorkingState();
+  timer = setInterval(fetchWorkingState, POLL_INTERVAL_MS);
+
+  return () => {
+    isCancelled = true;
+    if (timer) clearInterval(timer);
+  };
+}, [selectedRepo]);
+
+  const handleRepoSelect = async (name: string) => {
+    if (!name || name === selectedRepo) return;
+    setIsSwitchingRepo(true);
+    setStatusMessage("Loading commits…");
+    setCommits([]);
+    setSelectedCommitId(null);
+    setSelectedParentId(null);
+    setTreeFiles({});
+    setSelectedFile(null);
+    setDiffEntries({});
+    setWorkingState(null);
+    try {
+      const res = await fetch(`${API_BASE}/repos/use`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error(`switch repo failed: ${res.status}`);
+      const data = (await res.json()) as RepoSwitchResponse;
+      setRepoOptions(Array.from(new Set(data.repos)).sort((a, b) => a.localeCompare(b)));
+      setSelectedRepo(data.active);
+      setError(null);
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : String(err));
+      setStatusMessage("Failed to switch repository");
+    } finally {
+      setIsSwitchingRepo(false);
+    }
+  };
 
   useEffect(() => {
     if (!selectedCommit) return;
@@ -134,7 +322,10 @@ export default function App() {
   const fileNames = useMemo(() => Object.keys(treeFiles).sort(), [treeFiles]);
   const mergedContent = selectedFile ? treeFiles[selectedFile] ?? null : null;
   const diffEntry = selectedFile ? diffEntries[selectedFile] ?? null : null;
-  const parentOptions = selectedCommit?.parents ?? [];
+  const matchesWorkingTree =
+    !!workingState && !!selectedCommit && workingState.treeHash === selectedCommit.treeHash;
+  const workingFileCount = workingState ? Object.keys(workingState.files).length : 0;
+  const repoSelectDisabled = repoOptions.length === 0 || isSwitchingRepo;
 
   return (
     <div className="app-shell">
@@ -145,9 +336,39 @@ export default function App() {
         </header>
         {error ? <div className="error-banner">{error}</div> : null}
         {statusMessage ? <div className="status-banner">{statusMessage}</div> : null}
-        <CommitList commits={commits} selectedId={selectedCommitId} onSelect={setSelectedCommitId} />
+        <CommitList
+          commits={commits}
+          selectedId={selectedCommitId}
+          onSelect={setSelectedCommitId}
+          workingTreeHash={workingState?.treeHash ?? null}
+        />
       </aside>
       <main>
+        <div className="commit-parents">
+          {repoOptions.length > 0 ? (
+            <label>
+              Repository:
+              <select
+                value={selectedRepo ?? ""}
+                onChange={(event) => handleRepoSelect(event.target.value)}
+                disabled={repoSelectDisabled}
+              >
+                {!selectedRepo ? (
+                  <option value="" disabled>
+                    Select a repository
+                  </option>
+                ) : null}
+                {repoOptions.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <span>No repositories available</span>
+          )}
+        </div>
         {selectedCommit ? (
           <>
             <section className="commit-detail">
@@ -159,25 +380,7 @@ export default function App() {
                   <span>{new Date(selectedCommit.timestamp).toLocaleString()}</span>
                 </div>
               </div>
-              <div className="commit-parents">
-                {parentOptions.length > 0 ? (
-                  <label>
-                    Compare to parent:
-                    <select
-                      value={selectedParentId ?? ""}
-                      onChange={(event) => setSelectedParentId(event.target.value || null)}
-                    >
-                      {parentOptions.map((parentId) => (
-                        <option key={parentId} value={parentId}>
-                          {parentId.slice(0, 8)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : (
-                  <span>No parents</span>
-                )}
-              </div>
+
             </section>
 
             {conflicts.length > 0 ? (
@@ -205,6 +408,7 @@ export default function App() {
                   mergedContent={mergedContent}
                   viewMode={viewMode}
                   onChangeView={setViewMode}
+                  isWorkingTree={matchesWorkingTree}
                 />
               </div>
             </section>

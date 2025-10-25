@@ -1,19 +1,96 @@
 import express from "express";
 import cors from "cors";
 import path from "node:path";
+import fs from "node:fs";
+import { promises as fsp } from "node:fs";
 import { getDb } from "./db/schema";
 import { sha256 } from "./utils/hash";
 import { summarizeDiff } from "./utils/diff";
 import { createLocalRepo } from "../vc-core/repo";
-import type { RepoSnapshot } from "../vc-core/types";
+import type { RepoSnapshot, VCRepo } from "../vc-core/types";
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 const db = getDb();
 
-const remoteRepo = createLocalRepo({ rootDir: path.join(process.cwd(), ".vc-remote"), author: "server" });
-const repoReady = remoteRepo.init();
+const REMOTE_BASE = process.env.VC_REMOTE_BASE ?? path.join(process.cwd(), ".vc-remote");
+const DEFAULT_REPO_NAME = process.env.VC_REMOTE_NAME ?? "default";
+
+type RepoEntry = { repo: VCRepo; ready: Promise<void> };
+const repoCache = new Map<string, RepoEntry>();
+let activeRepoName = DEFAULT_REPO_NAME;
+
+function ensureBaseDir() {
+  fs.mkdirSync(REMOTE_BASE, { recursive: true });
+}
+
+function sanitizeRepoName(input: string) {
+  const value = input?.trim() ?? "";
+  if (!value) {
+    throw new Error("Repository name is required");
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(value)) {
+    throw new Error("Repository name must contain only letters, numbers, dot, underscore, or hyphen");
+  }
+  return value;
+}
+
+function getRepoRoot(name: string) {
+  return path.join(REMOTE_BASE, name);
+}
+
+function ensureRepoEntry(name: string): RepoEntry {
+  ensureBaseDir();
+  let entry = repoCache.get(name);
+  if (!entry) {
+    const repoRoot = getRepoRoot(name);
+    fs.mkdirSync(repoRoot, { recursive: true });
+    const repo = createLocalRepo({ rootDir: repoRoot, author: "server" });
+    const ready = repo.init();
+    entry = { repo, ready };
+    repoCache.set(name, entry);
+  }
+  return entry;
+}
+
+async function getActiveRepo(): Promise<VCRepo> {
+  const entry = ensureRepoEntry(activeRepoName);
+  await entry.ready;
+  return entry.repo;
+}
+
+async function switchActiveRepo(name: string): Promise<string> {
+  const clean = sanitizeRepoName(name);
+  activeRepoName = clean;
+  const entry = ensureRepoEntry(clean);
+  await entry.ready;
+  return clean;
+}
+
+async function listAvailableRepos(): Promise<string[]> {
+  ensureBaseDir();
+  try {
+    const entries = await fsp.readdir(REMOTE_BASE, { withFileTypes: true });
+    const names = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    if (!names.includes(activeRepoName)) {
+      names.push(activeRepoName);
+    }
+    return Array.from(new Set(names)).sort();
+  } catch (error) {
+    console.error("list repos error", error);
+    return [activeRepoName];
+  }
+}
+
+ensureRepoEntry(activeRepoName);
+
+class NotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NotFoundError";
+  }
+}
 
 function normalizeTextContent(value: string): string {
   if (value.includes("\\n") || value.includes("\\r") || value.includes("\\t")) {
@@ -23,6 +100,35 @@ function normalizeTextContent(value: string): string {
       .replace(/\\t/g, "\t");
   }
   return value;
+}
+
+type SnapshotIndexes = {
+  treeIndex: Map<string, Record<string, string>>;
+  blobIndex: Map<string, string>;
+};
+
+function buildSnapshotIndexes(snapshot: RepoSnapshot): SnapshotIndexes {
+  const treeIndex = new Map(snapshot.trees.map((tree) => [tree.hash, { ...tree.files }]));
+  const blobIndex = new Map(
+    snapshot.blobs.map((blob) => [blob.hash, Buffer.from(blob.content, "base64").toString("utf8")]),
+  );
+  return { treeIndex, blobIndex };
+}
+
+function materializeTreeFromSnapshot(treeHash: string, indexes: SnapshotIndexes): Record<string, string> {
+  const treeFiles = indexes.treeIndex.get(treeHash);
+  if (!treeFiles) {
+    throw new NotFoundError(`tree not found: ${treeHash}`);
+  }
+  const files: Record<string, string> = {};
+  for (const [filePath, blobHash] of Object.entries(treeFiles)) {
+    const content = indexes.blobIndex.get(blobHash);
+    if (content === undefined) {
+      throw new Error(`missing blob ${blobHash} for ${filePath}`);
+    }
+    files[filePath] = normalizeTextContent(content);
+  }
+  return files;
 }
 
 // health
@@ -55,8 +161,8 @@ app.post("/init", (_req, res) => {
 // GET /refs
 app.get("/refs", async (_req, res) => {
   try {
-    await repoReady;
-    const snapshot = await remoteRepo.exportSnapshot();
+    const repo = await getActiveRepo();
+    const snapshot = await repo.exportSnapshot();
     res.json(snapshot.refs);
   } catch (error) {
     console.error("refs error", error);
@@ -90,28 +196,15 @@ app.post("/snapshot", (req, res) => {
 // GET /tree/:hash -> { files: Record<path, string> with inline content }
 app.get("/tree/:hash", async (req, res) => {
   try {
-    await repoReady;
-    const snapshot = await remoteRepo.exportSnapshot();
-    const tree = snapshot.trees.find((entry) => entry.hash === req.params.hash);
-    if (!tree) {
-      return res.status(404).json({ error: "tree not found" });
-    }
-
-    const blobIndex = new Map(
-      snapshot.blobs.map((blob) => [blob.hash, Buffer.from(blob.content, "base64").toString("utf8")]),
-    );
-
-    const files: Record<string, string> = {};
-    for (const [path, blobHash] of Object.entries(tree.files)) {
-      const content = blobIndex.get(blobHash);
-      if (content === undefined) {
-        return res.status(500).json({ error: `missing blob ${blobHash} for ${path}` });
-      }
-      files[path] = normalizeTextContent(content);
-    }
-
+    const repo = await getActiveRepo();
+    const snapshot = await repo.exportSnapshot();
+    const indexes = buildSnapshotIndexes(snapshot);
+    const files = materializeTreeFromSnapshot(req.params.hash, indexes);
     res.json({ files });
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      return res.status(404).json({ error: error.message });
+    }
     console.error("tree error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });
@@ -143,8 +236,8 @@ app.post("/commit", (req, res) => {
 // GET /commits -> list with edges {id,parentId,...}
 app.get("/commits", async (_req, res) => {
   try {
-    await repoReady;
-    const commits = await remoteRepo.log();
+    const repo = await getActiveRepo();
+    const commits = await repo.log();
     res.json(commits);
   } catch (error) {
     console.error("commits error", error);
@@ -155,8 +248,8 @@ app.get("/commits", async (_req, res) => {
 
 app.get("/graph", async (_req, res) => {
   try {
-    await repoReady;
-    const snapshot = await remoteRepo.exportSnapshot();
+    const repo = await getActiveRepo();
+    const snapshot = await repo.exportSnapshot();
     res.json({ commits: snapshot.commits, refs: snapshot.refs });
   } catch (error) {
     console.error("graph error", error);
@@ -169,30 +262,13 @@ app.get("/graph", async (_req, res) => {
 app.post("/diff", async (req, res) => {
   const { olderTreeHash, newerTreeHash } = req.body as { olderTreeHash: string; newerTreeHash: string };
   try {
-    await repoReady;
-    const snapshot = await remoteRepo.exportSnapshot();
+    const repo = await getActiveRepo();
+    const snapshot = await repo.exportSnapshot();
 
-    const treeIndex = new Map(snapshot.trees.map((tree) => [tree.hash, tree.files]));
-    const blobIndex = new Map(
-      snapshot.blobs.map((blob) => [blob.hash, Buffer.from(blob.content, "base64").toString("utf8")]),
-    );
+    const indexes = buildSnapshotIndexes(snapshot);
 
-    const materializeFiles = (treeHash: string) => {
-      const treeFiles = treeIndex.get(treeHash);
-      if (!treeFiles) throw new Error(`tree not found: ${treeHash}`);
-      const files: Record<string, string> = {};
-      for (const [filePath, blobHash] of Object.entries(treeFiles)) {
-        const content = blobIndex.get(blobHash);
-        if (content === undefined) {
-          throw new Error(`missing blob ${blobHash} for ${filePath}`);
-        }
-        files[filePath] = normalizeTextContent(content);
-      }
-      return files;
-    };
-
-    const oldFiles = materializeFiles(olderTreeHash);
-    const newFiles = materializeFiles(newerTreeHash);
+    const oldFiles = materializeTreeFromSnapshot(olderTreeHash, indexes);
+    const newFiles = materializeTreeFromSnapshot(newerTreeHash, indexes);
 
     const paths = new Set([...Object.keys(oldFiles), ...Object.keys(newFiles)]);
     const out: Record<string, { adds: number; dels: number; patch: string; before: string; after: string }> = {};
@@ -206,17 +282,64 @@ app.post("/diff", async (req, res) => {
 
     res.json({ perFile: out });
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      return res.status(404).json({ error: error.message });
+    }
     console.error("diff error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });
   }
 });
 
+app.get("/repos", async (_req, res) => {
+  try {
+    const repos = await listAvailableRepos();
+    res.json({ active: activeRepoName, repos });
+  } catch (error) {
+    console.error("repos error", error);
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post("/repos", async (req, res) => {
+  const name = req.body?.name;
+  if (typeof name !== "string") {
+    return res.status(400).json({ error: "name must be a string" });
+  }
+  try {
+    const clean = sanitizeRepoName(name);
+    ensureRepoEntry(clean);
+    const repos = await listAvailableRepos();
+    res.json({ active: activeRepoName, repos });
+  } catch (error) {
+    console.error("create repo error", error);
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: message });
+  }
+});
+
+app.post("/repos/use", async (req, res) => {
+  const name = req.body?.name;
+  if (typeof name !== "string") {
+    return res.status(400).json({ error: "name must be a string" });
+  }
+  try {
+    const active = await switchActiveRepo(name);
+    const repos = await listAvailableRepos();
+    res.json({ active, repos });
+  } catch (error) {
+    console.error("switch repo error", error);
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: message });
+  }
+});
+
 app.post("/push", async (req, res) => {
   const snapshot = req.body as RepoSnapshot;
   try {
-    await repoReady;
-    await remoteRepo.importSnapshot(snapshot);
+    const repo = await getActiveRepo();
+    await repo.importSnapshot(snapshot);
     res.json({ ok: true });
   } catch (error) {
     console.error("push error", error);
@@ -227,11 +350,29 @@ app.post("/push", async (req, res) => {
 
 app.get("/pull", async (_req, res) => {
   try {
-    await repoReady;
-    const snapshot = await remoteRepo.exportSnapshot();
+    const repo = await getActiveRepo();
+    const snapshot = await repo.exportSnapshot();
     res.json(snapshot);
   } catch (error) {
     console.error("pull error", error);
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
+  }
+});
+
+app.get("/working", async (_req, res) => {
+  try {
+    const repo = await getActiveRepo();
+    const working = await repo.getWorking();
+    const snapshot = await repo.exportSnapshot();
+    const indexes = buildSnapshotIndexes(snapshot);
+    const files = materializeTreeFromSnapshot(working.treeHash, indexes);
+    res.json({ parentId: working.parentId, treeHash: working.treeHash, files });
+  } catch (error) {
+    if (error instanceof NotFoundError) {
+      return res.status(404).json({ error: error.message });
+    }
+    console.error("working error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });
   }

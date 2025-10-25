@@ -36,3 +36,9 @@ export interface ConflictEntry {
   ours?: string;
   theirs?: string;
 }
+
+export interface WorkingStatePayload {
+  parentId: string | null;
+  treeHash: string;
+  files: Record<string, string>;
+}
