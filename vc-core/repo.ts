@@ -51,20 +51,10 @@ class RepoImpl implements VCRepo {
       const timestamp = this.clock();
       const treeHash = this.computeTreeHash(EMPTY_TREE_FILES);
       await this.storage.saveTree({ hash: treeHash, files: EMPTY_TREE_FILES });
-      const commit: Commit = {
-        id: this.generateCommitId([], treeHash, "init", timestamp),
-        parents: [],
-        treeHash,
-        message: "init",
-        author: this.author,
-        source: "system",
-        aiMeta: null,
-        timestamp,
-      };
-      await this.storage.saveCommit(commit);
-      await this.storage.setRef(this.defaultBranch, commit.id);
-      await this.storage.setRef(HEAD_REF, commit.id);
-      await this.storage.setWorkingState({ parentId: commit.id, treeHash: commit.treeHash });
+
+      await this.storage.setRef(this.defaultBranch, null!);
+      await this.storage.setRef(HEAD_REF, `ref:${this.defaultBranch}`);
+      await this.storage.setWorkingState({ parentId: null, treeHash });
     }
 
     this.initialized = true;

@@ -6,7 +6,7 @@ import { RepoSelector } from "./components/ui/RepoSelector";
 import { RepoInstructions } from "./components/ui/RepoInstructions";
 import { CommitDetailPanel } from "./components/ui/CommitDetailPanel";
 import { ConflictsList } from "./components/ui/ConflictsList";
-import { WorkingTreeCard } from "./components/ui/WorkingTreeCard";
+import { CommitGraph } from "./components/CommitGraph";
 import type {
   Commit,
   DiffEntry,
@@ -19,20 +19,9 @@ import type {
 const API_BASE = "/api";
 const POLL_INTERVAL_MS = 5000;
 
-type RepoListResponse = { active: string | null; repos: string[] };
-type RepoSwitchResponse = { active: string; repos: string[] };
-
-function shortId(value: string | null | undefined) {
-  return value ? value.slice(0, 8) : "none";
-}
-
-function formatRelativeTime(timestamp: number) {
-  const diff = Date.now() - timestamp;
-  if (diff < 5_000) return "just now";
-  if (diff < 60_000) return `${Math.floor(diff / 1_000)}s ago`;
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  return new Date(timestamp).toLocaleTimeString();
-}
+type RepoListResponse = { active: string | null; repos: string[]; origin?: string | null };
+type RepoSwitchResponse = { active: string; repos: string[]; origin?: string | null };
+type RepoCreateResponse = { created: string; repos: string[]; origin?: string | null };
 
 function sortCommits(commits: Commit[]): Commit[] {
   return [...commits].sort((a, b) => b.timestamp - a.timestamp);
@@ -60,6 +49,9 @@ export default function App() {
   const [repoOptions, setRepoOptions] = useState<string[]>([]);
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
   const [isSwitchingRepo, setIsSwitchingRepo] = useState<boolean>(false);
+  const [isCreatingRepo, setIsCreatingRepo] = useState<boolean>(false);
+  const [repoOrigin, setRepoOrigin] = useState<string | null>(null);
+  const [workspaceView, setWorkspaceView] = useState<"diff" | "graph">("diff");
 
   const commitsById = useMemo(() => {
     const map = new Map<string, Commit>();
@@ -144,6 +136,7 @@ export default function App() {
         if (cancelled) return;
         const uniqueRepos = Array.from(new Set(data.repos)).sort((a, b) => a.localeCompare(b));
         setRepoOptions(uniqueRepos);
+        setRepoOrigin(data.origin ?? null);
         const initialRepo = data.active ?? uniqueRepos[0] ?? null;
         setSelectedRepo(initialRepo);
         setStatusMessage(initialRepo ? "Loading commits…" : "No repositories available");
@@ -173,6 +166,7 @@ useEffect(() => {
     setStatusMessage(repoOptions.length === 0 ? "No repositories available" : "Select a repository");
     latestCommitRef.current = null;
     followHeadRef.current = true;
+    setWorkspaceView("diff");
     return;
   }
 
@@ -223,6 +217,7 @@ useEffect(() => {
   const handleRepoSelect = async (name: string) => {
     if (!name || name === selectedRepo) return;
     setIsSwitchingRepo(true);
+    setWorkspaceView("diff");
     setStatusMessage("Loading commits…");
     setCommits([]);
     setSelectedCommitId(null);
@@ -240,6 +235,7 @@ useEffect(() => {
       if (!res.ok) throw new Error(`switch repo failed: ${res.status}`);
       const data = (await res.json()) as RepoSwitchResponse;
       setRepoOptions(Array.from(new Set(data.repos)).sort((a, b) => a.localeCompare(b)));
+      setRepoOrigin(data.origin ?? null);
       setSelectedRepo(data.active);
       setError(null);
     } catch (err) {
@@ -248,6 +244,43 @@ useEffect(() => {
       setStatusMessage("Failed to switch repository");
     } finally {
       setIsSwitchingRepo(false);
+    }
+  };
+
+  const handleCreateRepo = async () => {
+    if (isCreatingRepo) return;
+    if (typeof window === "undefined") return;
+    const input = window.prompt("Enter a name for the new repository:");
+    const name = input?.trim();
+    if (!name) return;
+    setIsCreatingRepo(true);
+    setStatusMessage("Creating repository…");
+    try {
+      const res = await fetch(`${API_BASE}/repos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (res.status === 409) {
+        setError("Repository already exists");
+        setStatusMessage("Repository already exists");
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(`create repo failed: ${res.status}`);
+      }
+      const data = (await res.json()) as RepoCreateResponse;
+      const uniqueRepos = Array.from(new Set(data.repos)).sort((a, b) => a.localeCompare(b));
+      setRepoOptions(uniqueRepos);
+      setRepoOrigin(data.origin ?? null);
+      setError(null);
+      await handleRepoSelect(data.created);
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : String(err));
+      setStatusMessage("Failed to create repository");
+    } finally {
+      setIsCreatingRepo(false);
     }
   };
 
@@ -329,8 +362,39 @@ useEffect(() => {
   const diffEntry = selectedFile ? diffEntries[selectedFile] ?? null : null;
   const matchesWorkingTree =
     !!workingState && !!selectedCommit && workingState.treeHash === selectedCommit.treeHash;
-  const workingFileCount = workingState ? Object.keys(workingState.files).length : 0;
-  const repoSelectDisabled = repoOptions.length === 0 || isSwitchingRepo;
+  const repoSelectDisabled = repoOptions.length === 0 || isSwitchingRepo || isCreatingRepo;
+  const parentOptions = selectedCommit?.parents ?? [];
+  const repoLinkCommand = useMemo(() => {
+    if (!selectedRepo || !repoOrigin) return "";
+    return `vc remote add ${selectedRepo} --remote ${repoOrigin}`;
+  }, [selectedRepo, repoOrigin]);
+  const hasCommits = commits.length > 0;
+  const showRepoInstructions = repoLinkCommand !== "" && commits.length === 0;
+  const workspaceContent =
+    workspaceView === "graph" ? (
+      <section className="workspace graph-view">
+        <CommitGraph commits={commits} selectedId={selectedCommitId} onSelect={setSelectedCommitId} />
+      </section>
+    ) : selectedCommit ? (
+      <section className="workspace">
+        <div className="file-column">
+          <h3>Files</h3>
+          <FileList files={fileNames} selected={selectedFile} onSelect={setSelectedFile} />
+        </div>
+        <div className="viewer-column">
+          <DiffViewer
+            fileName={selectedFile}
+            entry={diffEntry}
+            mergedContent={mergedContent}
+            viewMode={viewMode}
+            onChangeView={setViewMode}
+            isWorkingTree={matchesWorkingTree}
+          />
+        </div>
+      </section>
+    ) : (
+      <div className="empty-state">Select a commit to inspect details.</div>
+    );
 
   return (
     <div className="app-shell">
@@ -349,77 +413,51 @@ useEffect(() => {
         />
       </aside>
       <main>
-        <div className="commit-parents">
-          {repoOptions.length > 0 ? (
-            <label>
-              Repository:
-              <select
-                value={selectedRepo ?? ""}
-                onChange={(event) => handleRepoSelect(event.target.value)}
-                disabled={repoSelectDisabled}
-              >
-                {!selectedRepo ? (
-                  <option value="" disabled>
-                    Select a repository
-                  </option>
-                ) : null}
-                {repoOptions.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : (
-            <span>No repositories available</span>
-          )}
-        </div>
-        {selectedCommit ? (
+        <RepoSelector
+          repoOptions={repoOptions}
+          selectedRepo={selectedRepo}
+          disabled={repoSelectDisabled}
+          isCreating={isCreatingRepo}
+          isSwitching={isSwitchingRepo}
+          onSelectRepo={handleRepoSelect}
+          onCreateRepo={handleCreateRepo}
+        />
+        {showRepoInstructions ? <RepoInstructions command={repoLinkCommand} /> : null}
+        {hasCommits ? (
           <>
-            <section className="commit-detail">
-              <div>
-                <h2>{selectedCommit.message}</h2>
-                <div className="commit-meta-inline">
-                  <span>Author: {selectedCommit.author}</span>
-                  <span>Source: {selectedCommit.source}</span>
-                  <span>{new Date(selectedCommit.timestamp).toLocaleString()}</span>
-                </div>
-              </div>
-
-            </section>
-
-            {conflicts.length > 0 ? (
-              <section className="conflicts">
-                <h3>Conflicts</h3>
-                <ul>
-                  {conflicts.map((conflict) => (
-                    <li key={conflict.path}>
-                      <strong>{conflict.path}</strong>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            ) : null}
-
-            <section className="workspace">
-              <div className="file-column">
-                <h3>Files</h3>
-                <FileList files={fileNames} selected={selectedFile} onSelect={setSelectedFile} />
-              </div>
-              <div className="viewer-column">
-                <DiffViewer
-                  fileName={selectedFile}
-                  entry={diffEntry}
-                  mergedContent={mergedContent}
-                  viewMode={viewMode}
-                  onChangeView={setViewMode}
-                  isWorkingTree={matchesWorkingTree}
+            {selectedCommit ? (
+              <>
+                <CommitDetailPanel
+                  commit={selectedCommit}
+                  parentOptions={parentOptions}
+                  selectedParentId={selectedParentId}
+                  onChangeParent={setSelectedParentId}
                 />
+                <ConflictsList conflicts={conflicts} />
+              </>
+            ) : null}
+            <div className="workspace-controls">
+              <div className="workspace-toggle">
+                <button
+                  type="button"
+                  className={`workspace-toggle-button${workspaceView === "diff" ? " active" : ""}`}
+                  onClick={() => setWorkspaceView("diff")}
+                >
+                  Files & Diff
+                </button>
+                <button
+                  type="button"
+                  className={`workspace-toggle-button${workspaceView === "graph" ? " active" : ""}`}
+                  onClick={() => setWorkspaceView("graph")}
+                >
+                  Visualizer
+                </button>
               </div>
-            </section>
+            </div>
+            {workspaceContent}
           </>
         ) : (
-          <div className="empty-state">Select a commit to inspect details.</div>
+          <div className="empty-state">No commits yet.</div>
         )}
       </main>
     </div>
