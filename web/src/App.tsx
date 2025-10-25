@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CommitList } from "./components/CommitList";
 import { DiffViewer, type ViewMode } from "./components/DiffViewer";
 import { FileList } from "./components/FileList";
+import { RepoSelector } from "./components/ui/RepoSelector";
+import { RepoInstructions } from "./components/ui/RepoInstructions";
+import { CommitDetailPanel } from "./components/ui/CommitDetailPanel";
+import { ConflictsList } from "./components/ui/ConflictsList";
+import { WorkingTreeCard } from "./components/ui/WorkingTreeCard";
 import type {
   Commit,
   DiffEntry,

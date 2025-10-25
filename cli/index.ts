@@ -9,6 +9,69 @@ const IGNORED_DIRS = new Set([".git", ".vc", "node_modules", "dist", ".build", "
 const IGNORED_FILES = new Set([".DS_Store"]);
 const DEFAULT_REMOTE = process.env.VC_REMOTE ?? "http://localhost:3000";
 
+type RemoteConfig = { baseUrl: string; repo: string };
+interface CLIConfig {
+  remote?: RemoteConfig;
+}
+
+const CONFIG_FILE = "config.json";
+
+async function loadConfig(): Promise<CLIConfig> {
+  try {
+    const raw = await fsp.readFile(path.join(repoRoot(), CONFIG_FILE), "utf8");
+    return JSON.parse(raw) as CLIConfig;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return {};
+    }
+    throw error;
+  }
+}
+
+async function saveConfig(config: CLIConfig) {
+  await fsp.mkdir(repoRoot(), { recursive: true });
+  await fsp.writeFile(path.join(repoRoot(), CONFIG_FILE), JSON.stringify(config, null, 2));
+}
+
+async function saveRemoteConfig(remote: RemoteConfig) {
+  const config = await loadConfig();
+  config.remote = remote;
+  await saveConfig(config);
+}
+
+async function resolveBaseUrl(remoteOption?: string) {
+  if (remoteOption) return remoteOption;
+  const config = await loadConfig();
+  if (config.remote?.baseUrl) return config.remote.baseUrl;
+  return DEFAULT_REMOTE;
+}
+
+async function resolveRemoteTarget(remoteOption?: string, repoOption?: string) {
+  const config = await loadConfig();
+  const baseUrl = await resolveBaseUrl(remoteOption);
+  const repoName = repoOption ?? config.remote?.repo;
+  if (!repoName) {
+    throw new Error(
+      "remote repository not specified. Run `vc remote add <name>` or use `--repo <name>` with push/pull.",
+    );
+  }
+  return { baseUrl, repoName };
+}
+
+async function ensureRemoteSelected(baseUrl: string, repoName: string) {
+  const res = await fetch(buildRemoteUrl(baseUrl, "/repos/use"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: repoName }),
+  });
+  if (res.status === 404) {
+    throw new Error(`remote "${repoName}" does not exist at ${baseUrl}`);
+  }
+  if (!res.ok) {
+    throw new Error(`failed to select remote ${repoName}: ${res.status} ${res.statusText}`);
+  }
+}
+
 const program = new Command();
 program.name("vc").description("vc-core local CLI");
 
@@ -19,35 +82,48 @@ remoteCommand
   .option("--remote <url>", "remote base URL")
   .action(async (opts: { remote?: string }) => {
     const baseUrl = await resolveBaseUrl(opts.remote);
-    const res = await fetch(buildRemoteUrl(baseUrl, "/repos"));
-    if (!res.ok) {
-      throw new Error(`list failed: ${res.status} ${res.statusText}`);
+    try {
+      const res = await fetch(buildRemoteUrl(baseUrl, "/repos"));
+      if (!res.ok) {
+        throw new Error(`list failed: ${res.status} ${res.statusText}`);
+      }
+      const data = (await res.json()) as { active: string | null; repos: string[] };
+      console.log(`remote base: ${baseUrl}`);
+      if (data.repos.length === 0) {
+        console.log("no repositories found");
+        return;
+      }
+      data.repos.forEach((name) => {
+        const marker = name === data.active ? "*" : " ";
+        console.log(`${marker} ${name}`);
+      });
+    } catch (error) {
+      console.error(`[error] unable to list repositories: ${error instanceof Error ? error.message : error}`);
     }
-    const data = (await res.json()) as { active: string | null; repos: string[] };
-    console.log(`remote base: ${baseUrl}`);
-    if (data.repos.length === 0) {
-      console.log("no repositories found");
-      return;
-    }
-    data.repos.forEach((name) => {
-      const marker = name === data.active ? "*" : " ";
-      console.log(`${marker} ${name}`);
-    });
   });
 
 remoteCommand
   .command("add <name>")
   .option("--remote <url>", "remote base URL")
-  .option("--no-use", "do not set as default remote after creation")
-  .action(async (name: string, opts: { remote?: string; use?: boolean }) => {
+  .action(async (name: string, opts: { remote?: string }) => {
     const baseUrl = await resolveBaseUrl(opts.remote);
-    await createRemote(baseUrl, name);
-    if (opts.use !== false) {
-      await ensureRemoteSelected(baseUrl, name);
-      await saveRemoteConfig({ baseUrl, repo: name });
-      console.log(`set default remote to ${baseUrl}/${name}`);
+    const repoName = name.trim();
+    if (!repoName) {
+      console.error("repository name is required");
+      return;
     }
-    console.log(`remote ${name} ready at ${baseUrl}/${name}`);
+
+    try {
+      await ensureRemoteSelected(baseUrl, repoName);
+    } catch (error) {
+      console.error(
+        `[error] unable to link remote: ${error instanceof Error ? error.message : error}. Create the repository in the web viewer (or run 'vc remote create ${repoName}') before linking.`,
+      );
+      return;
+    }
+
+    await saveRemoteConfig({ baseUrl, repo: repoName });
+    console.log(`linked local repository to ${baseUrl}/${repoName}`);
   });
 
 remoteCommand
@@ -55,9 +131,55 @@ remoteCommand
   .option("--remote <url>", "remote base URL")
   .action(async (name: string, opts: { remote?: string }) => {
     const baseUrl = await resolveBaseUrl(opts.remote);
-    await ensureRemoteSelected(baseUrl, name);
+    try {
+      await ensureRemoteSelected(baseUrl, name);
+    } catch (error) {
+      console.error(
+        `[error] ${error instanceof Error ? error.message : error}. Create the repository in the web viewer before linking your local repo.`,
+      );
+      return;
+    }
     await saveRemoteConfig({ baseUrl, repo: name });
     console.log(`using remote ${baseUrl}/${name}`);
+  });
+
+remoteCommand
+  .command("create <name>")
+  .option("--remote <url>", "remote base URL")
+  .option("--use", "link this repository after creation")
+  .action(async (name: string, opts: { remote?: string; use?: boolean }) => {
+    const baseUrl = await resolveBaseUrl(opts.remote);
+    const repoName = name.trim();
+    if (!repoName) {
+      console.error("repository name is required");
+      return;
+    }
+    try {
+      const res = await fetch(buildRemoteUrl(baseUrl, "/repos"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: repoName }),
+      });
+      if (res.status === 409) {
+        console.error(`remote "${repoName}" already exists at ${baseUrl}`);
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(`${res.status} ${res.statusText}`);
+      }
+      console.log(`created remote ${baseUrl}/${repoName}`);
+      if (opts.use) {
+        await ensureRemoteSelected(baseUrl, repoName);
+        await saveRemoteConfig({ baseUrl, repo: repoName });
+        console.log(`linked local repository to ${baseUrl}/${repoName}`);
+      } else {
+        console.log(`run 'vc remote add ${repoName} --remote ${baseUrl}' to link your local repository.`);
+      }
+    } catch (error) {
+      console.error(
+        `[error] failed to create remote: ${error instanceof Error ? error.message : error}.`,
+      );
+    }
   });
 
 program
@@ -174,7 +296,13 @@ program
   .action(async (opts: { remote?: string; repo?: string }) => {
     const repo = await ensureRepo();
     const { baseUrl, repoName } = await resolveRemoteTarget(opts.remote, opts.repo);
-    await ensureRemoteSelected(baseUrl, repoName);
+    try {
+      await ensureRemoteSelected(baseUrl, repoName);
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}. Create the repository in the web viewer before pushing.`,
+      );
+    }
     const snapshot = await repo.exportSnapshot();
     await sendSnapshot(baseUrl, snapshot);
     console.log(`pushed ${snapshot.commits.length} commits to ${baseUrl}/${repoName}`);
@@ -188,7 +316,13 @@ program
   .action(async (opts: { remote?: string; repo?: string }) => {
     const repo = await ensureRepo();
     const { baseUrl, repoName } = await resolveRemoteTarget(opts.remote, opts.repo);
-    await ensureRemoteSelected(baseUrl, repoName);
+    try {
+      await ensureRemoteSelected(baseUrl, repoName);
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}. Create the repository in the web viewer before pulling.`,
+      );
+    }
     const snapshot = await fetchSnapshot(baseUrl);
     await repo.importSnapshot(snapshot);
     console.log(`pulled ${snapshot.commits.length} commits from ${baseUrl}/${repoName}`);
@@ -327,75 +461,4 @@ function buildRemoteUrl(base: string, pathSuffix: string) {
   const baseUrl = base.endsWith("/") ? base : `${base}/`;
   const target = pathSuffix.startsWith("/") ? pathSuffix.slice(1) : pathSuffix;
   return new URL(target, baseUrl).toString();
-}
-
-type RemoteConfig = { baseUrl: string; repo: string };
-interface CLIConfig {
-  remote?: RemoteConfig;
-}
-
-const CONFIG_FILE = "config.json";
-
-async function loadConfig(): Promise<CLIConfig> {
-  try {
-    const raw = await fsp.readFile(path.join(repoRoot(), CONFIG_FILE), "utf8");
-    return JSON.parse(raw) as CLIConfig;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-      return {};
-    }
-    throw error;
-  }
-}
-
-async function saveConfig(config: CLIConfig) {
-  await fsp.mkdir(repoRoot(), { recursive: true });
-  await fsp.writeFile(path.join(repoRoot(), CONFIG_FILE), JSON.stringify(config, null, 2));
-}
-
-async function saveRemoteConfig(remote: RemoteConfig) {
-  const config = await loadConfig();
-  config.remote = remote;
-  await saveConfig(config);
-}
-
-async function resolveBaseUrl(remoteOption?: string) {
-  if (remoteOption) return remoteOption;
-  const config = await loadConfig();
-  if (config.remote?.baseUrl) return config.remote.baseUrl;
-  return DEFAULT_REMOTE;
-}
-
-async function resolveRemoteTarget(remoteOption?: string, repoOption?: string) {
-  const config = await loadConfig();
-  const baseUrl = await resolveBaseUrl(remoteOption);
-  const repoName = repoOption ?? config.remote?.repo;
-  if (!repoName) {
-    throw new Error(
-      "remote repository not specified. Run `vc remote add <name>` or use `--repo <name>` with push/pull.",
-    );
-  }
-  return { baseUrl, repoName };
-}
-
-async function ensureRemoteSelected(baseUrl: string, repoName: string) {
-  const res = await fetch(buildRemoteUrl(baseUrl, "/repos/use"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: repoName }),
-  });
-  if (!res.ok) {
-    throw new Error(`failed to select remote ${repoName}: ${res.status} ${res.statusText}`);
-  }
-}
-
-async function createRemote(baseUrl: string, repoName: string) {
-  const res = await fetch(buildRemoteUrl(baseUrl, "/repos"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: repoName }),
-  });
-  if (!res.ok) {
-    throw new Error(`failed to create remote ${repoName}: ${res.status} ${res.statusText}`);
-  }
 }
