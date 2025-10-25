@@ -57,6 +57,35 @@ aside header p {
   color: #f87171;
 }
 
+.primary-button,
+.primary-button.small {
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  border: none;
+  color: inherit;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.primary-button {
+  background: rgba(59, 130, 246, 0.75);
+}
+
+.primary-button.small {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
+.primary-button:hover:enabled {
+  background: rgba(59, 130, 246, 0.9);
+}
+
+.primary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .commit-list {
   margin-top: 16px;
   display: flex;
@@ -157,20 +186,24 @@ main {
   flex-wrap: wrap;
 }
 
-.commit-parents {
+.repo-controls {
   display: flex;
   justify-content: flex-end;
+  gap: 12px;
   margin-bottom: 16px;
+  align-items: center;
 }
 
-.commit-parents label {
+.repo-controls label,
+.parent-select label {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 0.9rem;
 }
 
-.commit-parents select {
+.repo-controls select,
+.parent-select select {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);
   color: inherit;
@@ -178,9 +211,65 @@ main {
   border-radius: 6px;
 }
 
-.commit-parents select:disabled {
+.repo-controls select:disabled,
+.parent-select select:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.parent-select {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.repo-empty-state {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.9rem;
+}
+
+.repo-instructions {
+  margin-bottom: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(30, 41, 59, 0.6);
+  border-radius: 12px;
+  padding: 16px 20px;
+  color: rgba(226, 232, 240, 0.9);
+}
+
+.repo-instructions h2 {
+  margin: 0 0 8px 0;
+  font-size: 1.1rem;
+}
+
+.repo-instructions p {
+  margin: 0 0 12px 0;
+  font-size: 0.9rem;
+}
+
+.repo-instructions pre {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 8px;
+  padding: 12px;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  overflow-x: auto;
+  margin: 0 0 12px 0;
+}
+
+.repo-instructions code {
+  display: block;
+  color: #bfdbfe;
+}
+
+.repo-instructions .hint {
+  margin: 0;
+  opacity: 0.7;
+  font-style: italic;
 }
 
 .conflicts {
@@ -430,4 +519,34 @@ main {
 .working-state-card.in-sync {
   border-color: rgba(34, 197, 94, 0.55);
   box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.3);
+}
+
+.working-state-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+
+.working-state-card .label {
+  display: inline-block;
+  min-width: 70px;
+  opacity: 0.7;
+}
+
+.working-state-card code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+.working-state-card .timestamp {
+  margin-top: 6px;
+  opacity: 0.6;
+  font-style: italic;
 }

@@ -7,6 +7,7 @@ import { getDb } from "./db/schema";
 import { sha256 } from "./utils/hash";
 import { summarizeDiff } from "./utils/diff";
 import { createLocalRepo } from "../vc-core/repo";
+import type { Request } from "express";
 import type { RepoSnapshot, VCRepo } from "../vc-core/types";
 
 const app = express();
@@ -15,11 +16,26 @@ app.use(express.json({ limit: "50mb" }));
 const db = getDb();
 
 const REMOTE_BASE = process.env.VC_REMOTE_BASE ?? path.join(process.cwd(), ".vc-remote");
-const DEFAULT_REPO_NAME = process.env.VC_REMOTE_NAME ?? "default";
+const DEFAULT_REPO_NAME = process.env.VC_REMOTE_NAME ?? null;
 
 type RepoEntry = { repo: VCRepo; ready: Promise<void> };
 const repoCache = new Map<string, RepoEntry>();
-let activeRepoName = DEFAULT_REPO_NAME;
+let activeRepoName: string | null = null;
+
+function getRequestOrigin(req: Request) {
+  const host = req.get("host");
+  if (!host) {
+    return `${req.protocol}://localhost`;
+  }
+  return `${req.protocol}://${host}`;
+}
+
+class NotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NotFoundError";
+  }
+}
 
 function ensureBaseDir() {
   fs.mkdirSync(REMOTE_BASE, { recursive: true });
@@ -40,12 +56,32 @@ function getRepoRoot(name: string) {
   return path.join(REMOTE_BASE, name);
 }
 
+function repoExists(name: string) {
+  return fs.existsSync(getRepoRoot(name));
+}
+
+function createRepoEntry(name: string): RepoEntry {
+  ensureBaseDir();
+  const repoRoot = getRepoRoot(name);
+  fs.mkdirSync(repoRoot, { recursive: true });
+  let entry = repoCache.get(name);
+  if (!entry) {
+    const repo = createLocalRepo({ rootDir: repoRoot, author: "server" });
+    const ready = repo.init();
+    entry = { repo, ready };
+    repoCache.set(name, entry);
+  }
+  return entry;
+}
+
 function ensureRepoEntry(name: string): RepoEntry {
   ensureBaseDir();
+  if (!repoExists(name)) {
+    throw new NotFoundError(`repository not found: ${name}`);
+  }
   let entry = repoCache.get(name);
   if (!entry) {
     const repoRoot = getRepoRoot(name);
-    fs.mkdirSync(repoRoot, { recursive: true });
     const repo = createLocalRepo({ rootDir: repoRoot, author: "server" });
     const ready = repo.init();
     entry = { repo, ready };
@@ -55,6 +91,9 @@ function ensureRepoEntry(name: string): RepoEntry {
 }
 
 async function getActiveRepo(): Promise<VCRepo> {
+  if (!activeRepoName) {
+    throw new NotFoundError("no active repository selected");
+  }
   const entry = ensureRepoEntry(activeRepoName);
   await entry.ready;
   return entry.repo;
@@ -62,9 +101,9 @@ async function getActiveRepo(): Promise<VCRepo> {
 
 async function switchActiveRepo(name: string): Promise<string> {
   const clean = sanitizeRepoName(name);
-  activeRepoName = clean;
   const entry = ensureRepoEntry(clean);
   await entry.ready;
+  activeRepoName = clean;
   return clean;
 }
 
@@ -73,22 +112,28 @@ async function listAvailableRepos(): Promise<string[]> {
   try {
     const entries = await fsp.readdir(REMOTE_BASE, { withFileTypes: true });
     const names = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
-    if (!names.includes(activeRepoName)) {
-      names.push(activeRepoName);
+    if (activeRepoName && !names.includes(activeRepoName)) {
+      activeRepoName = null;
     }
     return Array.from(new Set(names)).sort();
   } catch (error) {
     console.error("list repos error", error);
-    return [activeRepoName];
+    return activeRepoName ? [activeRepoName] : [];
   }
 }
 
-ensureRepoEntry(activeRepoName);
+ensureBaseDir();
 
-class NotFoundError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NotFoundError";
+if (DEFAULT_REPO_NAME) {
+  try {
+    const clean = sanitizeRepoName(DEFAULT_REPO_NAME);
+    const entry = repoExists(clean) ? ensureRepoEntry(clean) : createRepoEntry(clean);
+    entry.ready.catch((error) => {
+      console.error("default repo init failed", error);
+    });
+    activeRepoName = clean;
+  } catch (error) {
+    console.error("default repo init failed", error);
   }
 }
 
@@ -165,6 +210,9 @@ app.get("/refs", async (_req, res) => {
     const snapshot = await repo.exportSnapshot();
     res.json(snapshot.refs);
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      return res.status(404).json({ error: error.message });
+    }
     console.error("refs error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });
@@ -240,6 +288,9 @@ app.get("/commits", async (_req, res) => {
     const commits = await repo.log();
     res.json(commits);
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      return res.status(404).json({ error: error.message });
+    }
     console.error("commits error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });
@@ -252,6 +303,9 @@ app.get("/graph", async (_req, res) => {
     const snapshot = await repo.exportSnapshot();
     res.json({ commits: snapshot.commits, refs: snapshot.refs });
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      return res.status(404).json({ error: error.message });
+    }
     console.error("graph error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });
@@ -291,10 +345,10 @@ app.post("/diff", async (req, res) => {
   }
 });
 
-app.get("/repos", async (_req, res) => {
+app.get("/repos", async (req, res) => {
   try {
     const repos = await listAvailableRepos();
-    res.json({ active: activeRepoName, repos });
+    res.json({ active: activeRepoName, repos, origin: getRequestOrigin(req) });
   } catch (error) {
     console.error("repos error", error);
     const message = error instanceof Error ? error.message : String(error);
@@ -309,9 +363,13 @@ app.post("/repos", async (req, res) => {
   }
   try {
     const clean = sanitizeRepoName(name);
-    ensureRepoEntry(clean);
+    if (repoExists(clean)) {
+      return res.status(409).json({ error: "repository already exists" });
+    }
+    const entry = createRepoEntry(clean);
+    entry.ready.catch((error) => console.error("repo init error", error));
     const repos = await listAvailableRepos();
-    res.json({ active: activeRepoName, repos });
+    res.status(201).json({ created: clean, repos, origin: getRequestOrigin(req) });
   } catch (error) {
     console.error("create repo error", error);
     const message = error instanceof Error ? error.message : String(error);
@@ -327,8 +385,11 @@ app.post("/repos/use", async (req, res) => {
   try {
     const active = await switchActiveRepo(name);
     const repos = await listAvailableRepos();
-    res.json({ active, repos });
+    res.json({ active, repos, origin: getRequestOrigin(req) });
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      return res.status(404).json({ error: error.message });
+    }
     console.error("switch repo error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(400).json({ error: message });
@@ -342,6 +403,9 @@ app.post("/push", async (req, res) => {
     await repo.importSnapshot(snapshot);
     res.json({ ok: true });
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      return res.status(404).json({ error: error.message });
+    }
     console.error("push error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });
@@ -354,6 +418,9 @@ app.get("/pull", async (_req, res) => {
     const snapshot = await repo.exportSnapshot();
     res.json(snapshot);
   } catch (error) {
+    if (error instanceof NotFoundError) {
+      return res.status(404).json({ error: error.message });
+    }
     console.error("pull error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: message });
