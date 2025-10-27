@@ -16,9 +16,9 @@ interface CLIConfig {
 
 const CONFIG_FILE = "config.json";
 
-async function loadConfig(): Promise<CLIConfig> {
+async function loadConfig(cwd: string = process.cwd()): Promise<CLIConfig> {
   try {
-    const raw = await fsp.readFile(path.join(repoRoot(), CONFIG_FILE), "utf8");
+    const raw = await fsp.readFile(path.join(repoRoot(cwd), CONFIG_FILE), "utf8");
     return JSON.parse(raw) as CLIConfig;
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -28,15 +28,15 @@ async function loadConfig(): Promise<CLIConfig> {
   }
 }
 
-async function saveConfig(config: CLIConfig) {
-  await fsp.mkdir(repoRoot(), { recursive: true });
-  await fsp.writeFile(path.join(repoRoot(), CONFIG_FILE), JSON.stringify(config, null, 2));
+async function saveConfig(cwd: string, config: CLIConfig) {
+  await fsp.mkdir(repoRoot(cwd), { recursive: true });
+  await fsp.writeFile(path.join(repoRoot(cwd), CONFIG_FILE), JSON.stringify(config, null, 2));
 }
 
-async function saveRemoteConfig(remote: RemoteConfig) {
-  const config = await loadConfig();
+async function saveRemoteConfig(remote: RemoteConfig, cwd: string = process.cwd()) {
+  const config = await loadConfig(cwd);
   config.remote = remote;
-  await saveConfig(config);
+  await saveConfig(cwd, config);
 }
 
 async function resolveBaseUrl(remoteOption?: string) {
@@ -180,6 +180,73 @@ remoteCommand
         `[error] failed to create remote: ${error instanceof Error ? error.message : error}.`,
       );
     }
+  });
+
+program
+  .command("clone <name>")
+  .description("clone a remote repository into a new directory")
+  .argument("[destination]", "target directory name (defaults to the remote name)")
+  .option("--remote <url>", "remote base URL")
+  .action(async (name: string, destination: string | undefined, opts: { remote?: string }) => {
+    const repoName = name.trim();
+    if (!repoName) {
+      console.error("repository name is required");
+      return;
+    }
+
+    const targetDirName = destination?.trim() ?? repoName;
+    if (!targetDirName) {
+      console.error("destination directory name is required");
+      return;
+    }
+
+    const baseUrl = await resolveBaseUrl(opts.remote);
+    try {
+      await ensureRemoteSelected(baseUrl, repoName);
+    } catch (error) {
+      console.error(
+        `[error] ${error instanceof Error ? error.message : error}. Create the repository in the web viewer before cloning.`,
+      );
+      return;
+    }
+
+    const targetDir = path.resolve(process.cwd(), targetDirName);
+    try {
+      const stats = await fsp.stat(targetDir);
+      if (!stats.isDirectory()) {
+        console.error(`destination path ${targetDir} already exists and is not a directory`);
+        return;
+      }
+      const entries = await fsp.readdir(targetDir);
+      if (entries.length > 0) {
+        console.error(`destination directory ${targetDir} already exists and is not empty`);
+        return;
+      }
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code === "ENOENT") {
+        await fsp.mkdir(targetDir, { recursive: true });
+      } else {
+        console.error(`[error] unable to access destination: ${err.message}`);
+        return;
+      }
+    }
+
+    const repo = createLocalRepo({ rootDir: targetDir, author: "cli" });
+    await repo.init();
+    await saveRemoteConfig({ baseUrl, repo: repoName }, targetDir);
+
+    const snapshot = await fetchSnapshot(baseUrl);
+    await repo.importSnapshot(snapshot);
+
+    if (snapshot.commits.length > 0) {
+      const files = await repo.hydrate("HEAD");
+      await writeWorkspace(targetDir, files);
+    } else {
+      await writeWorkspace(targetDir, {});
+    }
+
+    console.log(`cloned ${baseUrl}/${repoName} into ${targetDir}`);
   });
 
 program
@@ -340,8 +407,8 @@ async function ensureRepo(): Promise<VCRepo> {
   return repo;
 }
 
-function repoRoot() {
-  return path.join(process.cwd(), ".vc");
+function repoRoot(cwd: string = process.cwd()) {
+  return path.join(cwd, ".vc");
 }
 
 function normalizeSource(input: string) {

@@ -91,7 +91,7 @@ export function DiffViewer({
         <div className="diff-header-right">
           {isWorkingTree ? <span className="working-pill">Working tree</span> : null}
           <div className="diff-tabs">
-            {VIEW_TABS.map((tab) => (
+            {mergedContent?.includes('=') ? VIEW_TABS.map((tab) => (
               <button
                 key={tab.key}
                 className={tab.key === viewMode ? "active" : ""}
@@ -99,7 +99,7 @@ export function DiffViewer({
               >
                 {tab.label}
               </button>
-            ))}
+            )) : ''}
           </div>
         </div>
       </div>
