@@ -133,8 +133,8 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
       db.pragma("journal_mode = WAL");
     }
     return db
-    
-    ;
+
+      ;
   };
 
   const serializeFiles = (files: Record<string, string>) => JSON.stringify(files);
@@ -179,7 +179,7 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
 
         CREATE TABLE IF NOT EXISTS refs(
           name TEXT PRIMARY KEY,
-          commit_id TEXT NOT NULL
+          commit_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS working(
@@ -270,15 +270,15 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
         )
         .get(id) as
         | {
-            id: string;
-            parents: string;
-            treeHash: string;
-            message: string;
-            author: string;
-            source: string;
-            aiMeta: string | null;
-            timestamp: number;
-          }
+          id: string;
+          parents: string;
+          treeHash: string;
+          message: string;
+          author: string;
+          source: string;
+          aiMeta: string | null;
+          timestamp: number;
+        }
         | undefined;
       if (!row) return null;
       return {
@@ -300,15 +300,15 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
            FROM commits ORDER BY timestamp ASC`,
         )
         .all() as Array<{
-        id: string;
-        parents: string;
-        treeHash: string;
-        message: string;
-        author: string;
-        source: string;
-        aiMeta: string | null;
-        timestamp: number;
-      }>;
+          id: string;
+          parents: string;
+          treeHash: string;
+          message: string;
+          author: string;
+          source: string;
+          aiMeta: string | null;
+          timestamp: number;
+        }>;
 
       return rows.map((row) => ({
         id: row.id,
@@ -340,8 +340,18 @@ export function createSqliteStorage(config: SqliteStorageConfig): StorageAdapter
     },
     async setRef(name, commitId) {
       const database = ensureDb();
-      database.prepare(`INSERT OR REPLACE INTO refs(name, commit_id) VALUES(?, ?)`).run(name, commitId);
+
+      if (commitId == null) {
+        database
+          .prepare(`INSERT OR REPLACE INTO refs(name, commit_id) VALUES(?, NULL)`)
+          .run(name);
+      } else {
+        database
+          .prepare(`INSERT OR REPLACE INTO refs(name, commit_id) VALUES(?, ?)`)
+          .run(name, commitId);
+      }
     },
+
     async listRefs() {
       const database = ensureDb();
       const rows = database

@@ -443,7 +443,7 @@ useEffect(() => {
                   className={`workspace-toggle-button${workspaceView === "diff" ? " active" : ""}`}
                   onClick={() => setWorkspaceView("diff")}
                 >
-                  Files & Diff
+                  Directory View
                 </button>
                 <button
                   type="button"

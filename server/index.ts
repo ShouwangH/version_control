@@ -382,19 +382,32 @@ app.post("/repos/use", async (req, res) => {
   if (typeof name !== "string") {
     return res.status(400).json({ error: "name must be a string" });
   }
+
   try {
-    const active = await switchActiveRepo(name);
+    let active: string;
+    try {
+      // Try to switch to existing repo
+      active = await switchActiveRepo(name);
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        console.log(`[server] creating missing repo: ${name}`);
+        const entry = createRepoEntry(name);
+        await entry.ready;
+        active = await switchActiveRepo(name);
+      } else {
+        throw err;
+      }
+    }
+
     const repos = await listAvailableRepos();
     res.json({ active, repos, origin: getRequestOrigin(req) });
   } catch (error) {
-    if (error instanceof NotFoundError) {
-      return res.status(404).json({ error: error.message });
-    }
     console.error("switch repo error", error);
     const message = error instanceof Error ? error.message : String(error);
     res.status(400).json({ error: message });
   }
 });
+
 
 app.post("/push", async (req, res) => {
   const snapshot = req.body as RepoSnapshot;
